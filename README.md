@@ -1,19 +1,23 @@
 # There He Is – High-Performance Color Finder
 
-Fast, accurate on-screen color detection tool.
+Fast, accurate on-screen color detection tool with smooth aiming and auto-click.
 
 ## Features
-- **Color Picker** – sample any color from the screen with one click
-- **Specific Color Finder** – detect a target color with adjustable tolerance
-- **Red Box Overlay** – draws a bright red rectangle around the detected color in real time
-- **"There He Is"** – announces (TTS + console) when the color is found
-- **Mouse Move to Color** – optionally moves the mouse cursor to the center of the detection
-- **Fullscreen + Hidden Cursor Compatible** – works even when a game hides and recenters the cursor
-- **Live Status** – continuous commentary about where the color is, if it moved, if it was lost, etc.
-- High detection rate and accuracy using vectorized NumPy search + optional clustering
+
+- **Color Picker** – eyedropper or palette
+- **Specific Color Finder** – vectorized NumPy detection with adjustable tolerance
+- **Red Box Overlay** – bright red rectangle + crosshair on the aim point (toggleable)
+- **"There He Is"** – TTS + console announcement (toggleable)
+- **Smooth Mouse Aim (no snapping)** – eases the cursor toward the target instead of teleporting
+- **Aims at the TOP of the color** – not the center
+- **LMB Click when over color** – automatic left-click once the cursor is close enough (toggleable)
+- **Fullscreen + Hidden Cursor Compatible** – uses direct Windows API, works while games hide/recenter the cursor
+- **Live Status** – continuous commentary about acquisition, movement, and loss
+- **All major features are independently toggleable**
 
 ## Requirements
-- Windows (uses `pywin32` for reliable mouse & overlay)
+
+- Windows (uses `pywin32`)
 - Python 3.10+
 
 ```bash
@@ -22,14 +26,29 @@ python main.py
 ```
 
 ## Controls
-- **Pick Color** – activates eyedropper (click anywhere on screen)
-- **Start / Stop** – begin or stop continuous scanning
-- **Move Mouse** – toggle automatic mouse movement to the found color
-- **Tolerance** slider – how strict the color match is
-- **Min Size** – ignore tiny noise pixels / require a minimum blob size
 
-## Notes on Fullscreen + Hidden Cursor
-When a game hides the cursor and forces it to the center every frame, the system cursor is still movable via the Windows API. This tool uses direct `SetCursorPos` calls so the mouse can still be driven to the target. The game may pull the cursor back on the next frame — this is expected behavior of relative-input games. The red box overlay and detection continue to work regardless.
+| Control | Description |
+|---------|-------------|
+| **Pick Color (Eyedropper)** | Sample any pixel under the mouse |
+| **Choose from Palette** | Standard color dialog |
+| **Tolerance / Min Pixels / Scan Interval** | Detection sensitivity & speed |
+| **Move mouse (smooth, no snapping)** | Toggle smooth aim at the **top** of the detected color |
+| **LMB click when cursor is over the color** | Auto left-click once close enough |
+| **Show red-box overlay** | Toggle the visual box + crosshair |
+| **Voice announcements** | Toggle TTS |
+| **Smoothness slider** | 0.05 = very slow/smooth · 1.0 = almost instant |
+| **START / STOP** | Begin or stop continuous scanning |
+
+## Aiming Behavior
+
+- The aim point is calculated at the **top** of the color blob (slightly inset from the absolute top edge).
+- Mouse movement is **smooth interpolation** – no hard snaps.
+- When the cursor gets within ~12 px of the aim point and the click toggle is on, a left mouse button click is performed (with cooldown).
+
+## Fullscreen / Hidden Cursor Notes
+
+Games that hide the cursor and force it to the center every frame still leave the system cursor movable via `SetCursorPos`. This tool drives the cursor smoothly toward the target. The game may pull it back on the next frame — that is expected with relative-input titles. Detection and the red-box overlay continue regardless.
 
 ## Performance
-Uses `mss` for low-latency screen capture and NumPy for extremely fast color matching. Detection runs in a background thread so the UI stays responsive.
+
+`mss` for low-latency capture + NumPy vectorized search running in a background thread. Movement loop runs at ~120 Hz for smooth cursor motion.
