@@ -1,8 +1,8 @@
 """
 There He Is – High-performance color finder
 Features: color picker, red-box overlay, smooth mouse aim (top of color),
-LMB click when over color, no snapping, fullscreen/hidden-cursor compatible,
-TTS announcement, live status commentary, fully toggleable features.
+LMB click when over color, no snapping, draggable magnifier (1/4 screen),
+fullscreen/hidden-cursor compatible, TTS, live status, fully toggleable.
 """
 
 import sys
@@ -17,10 +17,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox, colorchooser
 import numpy as np
 from mss import mss
-from PIL import Image
+from PIL import Image, ImageTk
 import pyttsx3
 
-# Windows-specific for reliable mouse + overlay
 try:
     import win32api
     import win32con
@@ -32,7 +31,7 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Data structures
+# Data
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -43,14 +42,14 @@ class Detection:
     h: int
     cx: int
     cy: int
-    aim_x: int          # preferred aim point (top of color)
+    aim_x: int
     aim_y: int
     pixel_count: int
     timestamp: float
 
 
 # ---------------------------------------------------------------------------
-# Core color search (vectorized, fast)
+# Color search
 # ---------------------------------------------------------------------------
 
 def find_color_bbox(
@@ -59,10 +58,6 @@ def find_color_bbox(
     tolerance: float = 30.0,
     min_pixels: int = 25,
 ) -> Optional[Detection]:
-    """
-    Search the image for pixels close to target_rgb.
-    Returns bbox + centroid + top-aim point.
-    """
     if img is None or img.size == 0:
         return None
 
@@ -82,10 +77,8 @@ def find_color_bbox(
     h = y2 - y1 + 1
     cx = int(xs.mean())
     cy = int(ys.mean())
-
-    # Aim at the TOP of the color blob (slightly inset so we sit on the top edge)
     aim_x = cx
-    aim_y = y1 + max(2, h // 8)   # a few pixels down from the absolute top
+    aim_y = y1 + max(2, h // 8)
 
     return Detection(
         x=x1, y=y1, w=w, h=h,
@@ -97,7 +90,7 @@ def find_color_bbox(
 
 
 # ---------------------------------------------------------------------------
-# Overlay window (transparent, always-on-top, click-through)
+# Overlay (red box)
 # ---------------------------------------------------------------------------
 
 class Overlay:
@@ -139,7 +132,6 @@ class Overlay:
         self.canvas.delete("all")
         if not self.enabled or det is None:
             return
-
         x1, y1 = det.x, det.y
         x2, y2 = det.x + det.w, det.y + det.h
         pad = 4
@@ -147,16 +139,12 @@ class Overlay:
             x1 - pad, y1 - pad, x2 + pad, y2 + pad,
             outline="#FF0000", width=3
         )
-        # Crosshair at the AIM point (top of color)
         ax, ay = det.aim_x, det.aim_y
         self.canvas.create_line(ax - 12, ay, ax + 12, ay, fill="#FF0000", width=2)
         self.canvas.create_line(ax, ay - 12, ax, ay + 12, fill="#FF0000", width=2)
         self.canvas.create_text(
-            ax, y1 - 18,
-            text="THERE HE IS",
-            fill="#FF2222",
-            font=("Segoe UI", 14, "bold"),
-            anchor="s",
+            ax, y1 - 18, text="THERE HE IS",
+            fill="#FF2222", font=("Segoe UI", 14, "bold"), anchor="s",
         )
 
     def hide(self):
@@ -164,26 +152,160 @@ class Overlay:
 
 
 # ---------------------------------------------------------------------------
-# Smooth mouse controller (no snapping) + LMB click
+# Draggable Magnifier (≈ 1/4 of screen area, starts centered)
+# ---------------------------------------------------------------------------
+
+class Magnifier:
+    """
+    Always-on-top window that shows a zoomed view of the screen region
+    under its center. Size ≈ 1/4 of the primary screen area.
+    Fully draggable.
+    """
+
+    ZOOM = 2.5
+    REFRESH_MS = 33
+
+    def __init__(self, parent_app):
+        self.app = parent_app
+        self.enabled = False
+        self.root = None
+        self.label = None
+        self._photo = None
+        self._drag_data = {"x": 0, "y": 0}
+        self._after_id = None
+        self.sct = mss()
+
+        if WINDOWS:
+            self.sw = win32api.GetSystemMetrics(0)
+            self.sh = win32api.GetSystemMetrics(1)
+        else:
+            self.sw = parent_app.root.winfo_screenwidth()
+            self.sh = parent_app.root.winfo_screenheight()
+
+        self.win_w = self.sw // 2
+        self.win_h = self.sh // 2
+
+    def show(self):
+        if self.root is not None:
+            self.root.deiconify()
+            self.enabled = True
+            self._schedule_update()
+            return
+
+        self.root = tk.Toplevel()
+        self.root.title("Magnifier – drag me")
+        self.root.attributes("-topmost", True)
+        self.root.overrideredirect(False)
+        self.root.resizable(True, True)
+
+        x = (self.sw - self.win_w) // 2
+        y = (self.sh - self.win_h) // 2
+        self.root.geometry(f"{self.win_w}x{self.win_h}+{x}+{y}")
+
+        frame = tk.Frame(self.root, bg="#222", bd=2, relief="raised")
+        frame.pack(fill="both", expand=True)
+
+        self.label = tk.Label(frame, bg="black")
+        self.label.pack(fill="both", expand=True)
+
+        for w in (self.root, frame, self.label):
+            w.bind("<ButtonPress-1>", self._start_drag)
+            w.bind("<B1-Motion>", self._on_drag)
+
+        self.root.bind("<Escape>", lambda e: self.hide())
+
+        self.enabled = True
+        self._schedule_update()
+
+    def hide(self):
+        self.enabled = False
+        if self._after_id:
+            try:
+                self.root.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+        if self.root:
+            self.root.withdraw()
+
+    def destroy(self):
+        self.hide()
+        if self.root:
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+            self.root = None
+
+    def _start_drag(self, event):
+        self._drag_data["x"] = event.x_root
+        self._drag_data["y"] = event.y_root
+
+    def _on_drag(self, event):
+        if self.root is None:
+            return
+        dx = event.x_root - self._drag_data["x"]
+        dy = event.y_root - self._drag_data["y"]
+        self._drag_data["x"] = event.x_root
+        self._drag_data["y"] = event.y_root
+        geo = self.root.geometry().split("+")
+        size = geo[0]
+        cur_x = int(geo[1])
+        cur_y = int(geo[2])
+        self.root.geometry(f"{size}+{cur_x + dx}+{cur_y + dy}")
+
+    def _schedule_update(self):
+        if not self.enabled or self.root is None:
+            return
+        self._update_view()
+        self._after_id = self.root.after(self.REFRESH_MS, self._schedule_update)
+
+    def _update_view(self):
+        if not self.enabled or self.root is None or not self.root.winfo_exists():
+            return
+        try:
+            wx = self.root.winfo_x()
+            wy = self.root.winfo_y()
+            ww = max(64, self.root.winfo_width())
+            wh = max(64, self.root.winfo_height())
+
+            src_w = max(32, int(ww / self.ZOOM))
+            src_h = max(32, int(wh / self.ZOOM))
+            src_x = wx + (ww - src_w) // 2
+            src_y = wy + (wh - src_h) // 2
+
+            src_x = max(0, min(src_x, self.sw - src_w))
+            src_y = max(0, min(src_y, self.sh - src_h))
+
+            mon = {"left": src_x, "top": src_y, "width": src_w, "height": src_h}
+            shot = self.sct.grab(mon)
+            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+            img = img.resize((ww, wh), Image.NEAREST)
+
+            self._photo = ImageTk.PhotoImage(img)
+            self.label.configure(image=self._photo)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Smooth mouse + LMB
 # ---------------------------------------------------------------------------
 
 class MouseController:
     def __init__(self):
         self.move_enabled = False
         self.click_enabled = False
-        self.smoothness = 0.35          # 0.05 = very slow/smooth, 1.0 = instant
-        self.click_cooldown = 0.35      # seconds between auto-clicks
+        self.smoothness = 0.35
+        self.click_cooldown = 0.35
         self.last_click_time = 0.0
         self._target: Optional[Tuple[float, float]] = None
         self._lock = threading.Lock()
-
-        # Smooth movement thread
         self._running = True
         self._thread = threading.Thread(target=self._smooth_loop, daemon=True)
         self._thread.start()
 
     def set_target(self, x: float, y: float):
-        """Set the desired aim point (smooth movement will chase it)."""
         with self._lock:
             self._target = (float(x), float(y))
 
@@ -213,13 +335,11 @@ class MouseController:
     def _click_lmb(self):
         if not WINDOWS:
             return
-        # SendInput style via mouse_event (reliable)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         time.sleep(0.02)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
     def _smooth_loop(self):
-        """Continuously ease the cursor toward the current target (no snapping)."""
         while self._running:
             if self.move_enabled:
                 with self._lock:
@@ -230,30 +350,22 @@ class MouseController:
                     dx = tx - cx
                     dy = ty - cy
                     dist = math.hypot(dx, dy)
-
                     if dist > 1.5:
-                        # Linear interpolation with configurable smoothness
-                        # higher smoothness → larger step → faster catch-up
                         step = max(self.smoothness, 0.05)
-                        nx = cx + dx * step
-                        ny = cy + dy * step
-                        self._set_cursor(nx, ny)
-
-                    # Auto-click when we are close enough to the aim point
+                        self._set_cursor(cx + dx * step, cy + dy * step)
                     if self.click_enabled and dist < 12:
                         now = time.time()
                         if now - self.last_click_time >= self.click_cooldown:
                             self._click_lmb()
                             self.last_click_time = now
-
-            time.sleep(0.008)  # ~120 Hz movement update
+            time.sleep(0.008)
 
     def stop(self):
         self._running = False
 
 
 # ---------------------------------------------------------------------------
-# TTS helper
+# TTS
 # ---------------------------------------------------------------------------
 
 class Speaker:
@@ -285,28 +397,27 @@ class Speaker:
 
 
 # ---------------------------------------------------------------------------
-# Main application
+# Main App
 # ---------------------------------------------------------------------------
 
 class ThereHeIsApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("There He Is – Color Finder")
-        self.root.geometry("440x620")
+        self.root.geometry("440x680")
         self.root.resizable(False, False)
 
-        # Detection state
         self.target_color: Tuple[int, int, int] = (255, 0, 0)
         self.tolerance = tk.DoubleVar(value=35.0)
         self.min_pixels = tk.IntVar(value=40)
         self.scan_interval = tk.DoubleVar(value=0.04)
 
-        # Feature toggles
         self.move_enabled = tk.BooleanVar(value=False)
         self.click_enabled = tk.BooleanVar(value=False)
         self.overlay_enabled = tk.BooleanVar(value=True)
         self.tts_enabled = tk.BooleanVar(value=True)
-        self.smoothness = tk.DoubleVar(value=0.35)   # 0.05–1.0
+        self.magnifier_enabled = tk.BooleanVar(value=False)
+        self.smoothness = tk.DoubleVar(value=0.35)
 
         self.running = False
         self.last_detection: Optional[Detection] = None
@@ -315,6 +426,7 @@ class ThereHeIsApp:
 
         self.sct = mss()
         self.overlay = Overlay()
+        self.magnifier = Magnifier(self)
         self.mouse = MouseController()
         self.speaker = Speaker()
         self.cmd_queue: queue.Queue = queue.Queue()
@@ -329,55 +441,43 @@ class ThereHeIsApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(80, self._process_queue)
 
-    # ----- UI -----
     def _build_ui(self):
-        pad = {"padx": 10, "pady": 5}
+        pad = {"padx": 10, "pady": 4}
         frm = ttk.Frame(self.root, padding=12)
         frm.pack(fill="both", expand=True)
 
-        # ---- Target Color ----
         color_frame = ttk.LabelFrame(frm, text="Target Color", padding=8)
         color_frame.pack(fill="x", **pad)
-
         self.color_preview = tk.Canvas(color_frame, width=60, height=40, bg="#FF0000", highlightthickness=1)
         self.color_preview.grid(row=0, column=0, rowspan=2, padx=8, pady=4)
-
         ttk.Button(color_frame, text="Pick Color (Eyedropper)", command=self._start_eyedropper).grid(
-            row=0, column=1, sticky="ew", padx=4
-        )
+            row=0, column=1, sticky="ew", padx=4)
         ttk.Button(color_frame, text="Choose from Palette", command=self._choose_color).grid(
-            row=1, column=1, sticky="ew", padx=4
-        )
+            row=1, column=1, sticky="ew", padx=4)
         self.color_label = ttk.Label(color_frame, text="RGB(255, 0, 0)")
         self.color_label.grid(row=2, column=0, columnspan=2, pady=4)
 
-        # ---- Detection Settings ----
         set_frame = ttk.LabelFrame(frm, text="Detection Settings", padding=8)
         set_frame.pack(fill="x", **pad)
-
         ttk.Label(set_frame, text="Tolerance:").grid(row=0, column=0, sticky="w")
         ttk.Scale(set_frame, from_=5, to=120, variable=self.tolerance, orient="horizontal").grid(
-            row=0, column=1, sticky="ew", padx=4
-        )
+            row=0, column=1, sticky="ew", padx=4)
         self.tol_label = ttk.Label(set_frame, text="35")
         self.tol_label.grid(row=0, column=2)
         self.tolerance.trace_add("write", lambda *_: self.tol_label.config(text=f"{self.tolerance.get():.0f}"))
 
         ttk.Label(set_frame, text="Min Pixels:").grid(row=1, column=0, sticky="w")
         ttk.Scale(set_frame, from_=5, to=500, variable=self.min_pixels, orient="horizontal").grid(
-            row=1, column=1, sticky="ew", padx=4
-        )
+            row=1, column=1, sticky="ew", padx=4)
         self.min_label = ttk.Label(set_frame, text="40")
         self.min_label.grid(row=1, column=2)
         self.min_pixels.trace_add("write", lambda *_: self.min_label.config(text=str(self.min_pixels.get())))
 
         ttk.Label(set_frame, text="Scan Interval:").grid(row=2, column=0, sticky="w")
         ttk.Scale(set_frame, from_=0.02, to=0.25, variable=self.scan_interval, orient="horizontal").grid(
-            row=2, column=1, sticky="ew", padx=4
-        )
+            row=2, column=1, sticky="ew", padx=4)
         set_frame.columnconfigure(1, weight=1)
 
-        # ---- Feature Toggles ----
         tog_frame = ttk.LabelFrame(frm, text="Feature Toggles", padding=8)
         tog_frame.pack(fill="x", **pad)
 
@@ -385,23 +485,23 @@ class ThereHeIsApp:
             tog_frame, text="Move mouse (smooth, no snapping) → aims at TOP of color",
             variable=self.move_enabled, command=self._sync_toggles
         ).pack(anchor="w")
-
         ttk.Checkbutton(
             tog_frame, text="LMB click when cursor is over the color",
             variable=self.click_enabled, command=self._sync_toggles
         ).pack(anchor="w")
-
         ttk.Checkbutton(
             tog_frame, text="Show red-box overlay",
             variable=self.overlay_enabled, command=self._sync_toggles
         ).pack(anchor="w")
-
         ttk.Checkbutton(
             tog_frame, text="Voice announcements (\"There he is\")",
             variable=self.tts_enabled, command=self._sync_toggles
         ).pack(anchor="w")
+        ttk.Checkbutton(
+            tog_frame, text="Magnifier (¼ screen, draggable, starts centered)",
+            variable=self.magnifier_enabled, command=self._sync_toggles
+        ).pack(anchor="w")
 
-        # Smoothness slider
         sm_frame = ttk.Frame(tog_frame)
         sm_frame.pack(fill="x", pady=(6, 0))
         ttk.Label(sm_frame, text="Smoothness:").pack(side="left")
@@ -412,22 +512,17 @@ class ThereHeIsApp:
         self.smooth_label = ttk.Label(sm_frame, text="0.35")
         self.smooth_label.pack(side="left")
         self.smoothness.trace_add("write", lambda *_: self.smooth_label.config(
-            text=f"{self.smoothness.get():.2f}"
-        ))
+            text=f"{self.smoothness.get():.2f}"))
 
-        # ---- Start / Stop ----
         btn_frame = ttk.Frame(frm)
         btn_frame.pack(fill="x", **pad)
         self.start_btn = ttk.Button(btn_frame, text="▶  START SCANNING", command=self._toggle_running)
         self.start_btn.pack(fill="x", ipady=8)
 
-        # ---- Live Status ----
         status_frame = ttk.LabelFrame(frm, text="Live Status", padding=8)
         status_frame.pack(fill="both", expand=True, **pad)
-
         self.status_var = tk.StringVar(value="Ready. Pick a color and press Start.")
         ttk.Label(status_frame, textvariable=self.status_var, wraplength=400, justify="left").pack(anchor="w")
-
         self.detail_var = tk.StringVar(value="")
         ttk.Label(status_frame, textvariable=self.detail_var, foreground="#555").pack(anchor="w")
 
@@ -440,6 +535,11 @@ class ThereHeIsApp:
             self.overlay.hide()
         if not self.move_enabled.get():
             self.mouse.clear_target()
+
+        if self.magnifier_enabled.get():
+            self.magnifier.show()
+        else:
+            self.magnifier.hide()
 
     def _on_smooth_change(self, *_):
         self.mouse.smoothness = float(self.smoothness.get())
@@ -497,26 +597,21 @@ class ThereHeIsApp:
             self.status_var.set("Stopped.")
             self.speaker.say("Scanning stopped", force=True)
 
-    # ----- Worker -----
     def _scan_loop(self):
         while True:
             if not self.running:
                 time.sleep(0.05)
                 continue
-
             t0 = time.time()
             try:
                 mon = self.sct.monitors[1]
                 shot = self.sct.grab(mon)
                 img = np.array(Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX"))
-
                 det = find_color_bbox(
-                    img,
-                    self.target_color,
+                    img, self.target_color,
                     tolerance=self.tolerance.get(),
                     min_pixels=self.min_pixels.get(),
                 )
-
                 if det:
                     det.x += mon["left"]
                     det.y += mon["top"]
@@ -529,7 +624,6 @@ class ThereHeIsApp:
                     self.cmd_queue.put(("lost", None))
             except Exception as e:
                 self.cmd_queue.put(("error", str(e)))
-
             elapsed = time.time() - t0
             time.sleep(max(0.001, self.scan_interval.get() - elapsed))
 
@@ -558,11 +652,9 @@ class ThereHeIsApp:
         else:
             self.overlay.hide()
 
-        # Feed smooth mouse the TOP aim point (no snapping)
         if self.mouse.move_enabled:
             self.mouse.set_target(det.aim_x, det.aim_y)
 
-        # Commentary
         moved = False
         if prev:
             dist = math.hypot(det.aim_x - prev.aim_x, det.aim_y - prev.aim_y)
@@ -581,7 +673,6 @@ class ThereHeIsApp:
             )
 
         self.status_var.set("THERE HE IS")
-
         if prev is None or moved:
             self.speaker.say("There he is")
 
@@ -601,6 +692,7 @@ class ThereHeIsApp:
     def _on_close(self):
         self.running = False
         self.mouse.stop()
+        self.magnifier.destroy()
         try:
             self.overlay.root.destroy()
         except Exception:
@@ -612,7 +704,6 @@ class ThereHeIsApp:
         self.root.mainloop()
 
 
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("There He Is – Color Finder starting…")
     app = ThereHeIsApp()
