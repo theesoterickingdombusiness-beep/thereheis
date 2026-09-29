@@ -1,6 +1,6 @@
 # There He Is – High-Performance Color Finder
 
-Fast, accurate on-screen color detection tool with smooth aiming and auto-click.
+Fast, accurate on-screen color detection tool with smooth aiming, auto-click, and a draggable magnifier.
 
 ## Features
 
@@ -8,11 +8,12 @@ Fast, accurate on-screen color detection tool with smooth aiming and auto-click.
 - **Specific Color Finder** – vectorized NumPy detection with adjustable tolerance
 - **Red Box Overlay** – bright red rectangle + crosshair on the aim point (toggleable)
 - **"There He Is"** – TTS + console announcement (toggleable)
-- **Smooth Mouse Aim (no snapping)** – eases the cursor toward the target instead of teleporting
+- **Smooth Mouse Aim (no snapping)** – eases the cursor toward the target
 - **Aims at the TOP of the color** – not the center
-- **LMB Click when over color** – automatic left-click once the cursor is close enough (toggleable)
-- **Fullscreen + Hidden Cursor Compatible** – uses direct Windows API, works while games hide/recenter the cursor
-- **Live Status** – continuous commentary about acquisition, movement, and loss
+- **LMB Click when over color** – automatic left-click once close enough (toggleable)
+- **Draggable Magnifier** – ≈ ¼ of the screen, starts centered, fully draggable, live zoom
+- **Fullscreen + Hidden Cursor Compatible**
+- **Live Status** – continuous commentary
 - **All major features are independently toggleable**
 
 ## Requirements
@@ -36,19 +37,20 @@ python main.py
 | **LMB click when cursor is over the color** | Auto left-click once close enough |
 | **Show red-box overlay** | Toggle the visual box + crosshair |
 | **Voice announcements** | Toggle TTS |
+| **Magnifier (¼ screen, draggable)** | Opens a live zoomed window (starts centered). Drag it anywhere. Escape closes it. |
 | **Smoothness slider** | 0.05 = very slow/smooth · 1.0 = almost instant |
 | **START / STOP** | Begin or stop continuous scanning |
 
+## Magnifier
+
+- Size is approximately **one-quarter of the primary screen area** (half width × half height).
+- Starts **centered** on the screen.
+- **Drag** the window by its title bar or content area to reposition it.
+- Continuously shows a zoomed (2.5×) view of the screen region under its center.
+- Press **Escape** while focused on the magnifier to hide it, or uncheck the toggle.
+
 ## Aiming Behavior
 
-- The aim point is calculated at the **top** of the color blob (slightly inset from the absolute top edge).
-- Mouse movement is **smooth interpolation** – no hard snaps.
-- When the cursor gets within ~12 px of the aim point and the click toggle is on, a left mouse button click is performed (with cooldown).
-
-## Fullscreen / Hidden Cursor Notes
-
-Games that hide the cursor and force it to the center every frame still leave the system cursor movable via `SetCursorPos`. This tool drives the cursor smoothly toward the target. The game may pull it back on the next frame — that is expected with relative-input titles. Detection and the red-box overlay continue regardless.
-
-## Performance
-
-`mss` for low-latency capture + NumPy vectorized search running in a background thread. Movement loop runs at ~120 Hz for smooth cursor motion.
+- Aim point is near the **top** of the color blob.
+- Mouse movement uses smooth interpolation (no hard snaps).
+- When the cursor is within ~12 px of the aim point and the click toggle is on, a left-click is fired (with cooldown).
